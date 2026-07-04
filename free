@@ -279,23 +279,25 @@ local Window = WindUI:CreateWindow({
     IconSize     = 20,
     Folder       = "MM2Hub",
     Theme        = "Dark",
-    -- Mobile-friendly portrait base size so AutoScale clamps at 1.0 instead of shrinking to 48%
-    Size         = IsMobile and UDim2.fromOffset(440, 620) or UDim2.fromOffset(640, 500),
-    MinSize      = Vector2.new(360, 420),
-    MaxSize      = Vector2.new(900, 760),
+    -- IMPORTANT: use OFFSET (pixel) sizes only — AutoScale reads .Offset, not .Scale.
+    -- Moderate width + deliberately SHORT height keeps it from filling the whole short dimension on phones.
+    Size         = UDim2.fromOffset(560, 380),
+    -- Lower MinSize.Y so the window is not forced to fill the short dimension (default 350)
+    MinSize      = Vector2.new(420, 280),
+    MaxSize      = Vector2.new(720, 480),
     ToggleKey    = Enum.KeyCode.RightControl,
     Transparent  = false,
-    -- Resizable = false on mobile (the 32px corner drag-handle is awful on touch)
-    Resizable    = not IsMobile,
-    -- Smaller sidebar on mobile so content has more room
-    SideBarWidth = IsMobile and 150 or 200,
-    -- Use Default topbar buttons (16px) instead of Mac (11px) — bigger touch targets
-    Topbar       = { Height = IsMobile and 48 or 52, ButtonsType = "Default" },
+    Resizable    = true,
+    -- Compact sidebar (default 200 is too wide on phones)
+    SideBarWidth = 170,
+    -- Compact topbar (Mac buttons are 11px, but the official example uses them and they look cleaner)
+    Topbar       = { Height = 44, ButtonsType = "Mac" },
     Radius       = 16,
-    -- Slightly smaller element corners look cleaner when scaled
-    ElementsRadius = IsMobile and 14 or 8,
+    -- Tighter element padding with NewElements = true
+    NewElements  = true,
+    ElementsRadius = 14,
     Acrylic      = false,
-    -- AutoScale runs ONCE at init with a 40px margin. With our portrait base size it clamps at 1.0.
+    -- AutoScale runs ONCE at init with a 40px margin. Keeps the UI at a comfortable size.
     AutoScale    = true,
     HideSearchBar = false,
     OpenButton   = {
@@ -305,30 +307,31 @@ local Window = WindUI:CreateWindow({
         Draggable = true,
         OnlyMobile = false,
         CornerRadius = UDim.new(1, 0),
-        -- Smaller FAB on mobile so it doesn't cover content
-        Scale = IsMobile and 0.85 or 1.0,
+        -- Smaller floating button on mobile (0.55 like the official example)
+        Scale = IsMobile and 0.55 or 1.0,
     },
 })
 
--- On mobile: reset UIScale to 1 and go fullscreen so the UI truly fills the viewport.
--- AutoScale ran at init and shrank UIScale; reset before fullscreen or the size math overflows.
-if IsMobile then
-    task.defer(function()
-        pcall(function()
-            Window:SetUIScale(1)
-            Window:ToggleFullscreen()
-        end)
-    end)
-    -- Re-fit if the user rotates the device (WindUI does not do this itself)
-    Camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
-        if not Window.IsFullscreen then
-            local vp = Camera.ViewportSize
-            local ws = Vector2.new(Window.Size.X.Offset, Window.Size.Y.Offset)
-            local s = math.clamp(math.min((vp.X - 80) / ws.X, (vp.Y - 80) / ws.Y), 0.3, 1.0)
-            pcall(function() Window:SetUIScale(s) end)
-        end
-    end)
+-- Re-fit the UI scale on orientation / viewport changes (WindUI's AutoScale does NOT do this itself).
+-- We recompute the scale manually using the same math WindUI uses internally.
+local function RefitUIScale()
+    if Window.IsFullscreen then return end  -- leave fullscreen alone
+    local margin = 40
+    local vp = Camera.ViewportSize
+    local wsize = Vector2.new(
+        Window.UIElements.Main.Size.X.Offset,
+        Window.UIElements.Main.Size.Y.Offset
+    )
+    local sx = (vp.X - margin * 2) / wsize.X
+    local sy = (vp.Y - margin * 2) / wsize.Y
+    local s = math.clamp(math.min(sx, sy), 0.3, 1.0)
+    pcall(function() Window:SetUIScale(s) end)
 end
+
+Camera:GetPropertyChangedSignal("ViewportSize"):Connect(RefitUIScale)
+-- Re-fit shortly after open, once layout has settled
+task.delay(0.2, RefitUIScale)
+task.delay(1, RefitUIScale)
 
 -- Version badge
 Window:Tag({
@@ -337,6 +340,12 @@ Window:Tag({
     Color = Color3.fromHex("#1c1c1c"),
     Border = true,
 })
+
+-- Disable the Fullscreen topbar button on mobile — it makes the UI too big
+-- (fills ~98% of the screen with only 10px margins and disables AutoScale)
+if IsMobile then
+    pcall(function() Window:DisableTopbarButtons({ "Fullscreen" }) end)
+end
 
 -- ============================================================
 --  5. TABS
