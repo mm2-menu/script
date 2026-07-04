@@ -290,8 +290,9 @@ local Window = WindUI:CreateWindow({
     Resizable    = true,
     -- Compact sidebar (default 200 is too wide on phones)
     SideBarWidth = 170,
-    -- Compact topbar (Mac buttons are 11px, but the official example uses them and they look cleaner)
-    Topbar       = { Height = 44, ButtonsType = "Mac" },
+    -- Compact topbar with Default buttons (16px, easy to tap on mobile)
+    -- Mac buttons are 11px circles — too small for touch
+    Topbar       = { Height = 44, ButtonsType = "Default" },
     Radius       = 16,
     -- Tighter element padding with NewElements = true
     NewElements  = true,
@@ -346,6 +347,13 @@ Window:Tag({
 if IsMobile then
     pcall(function() Window:DisableTopbarButtons({ "Fullscreen" }) end)
 end
+
+-- Notify the user how to reopen the UI after minimizing/closing
+Window:OnClose(function()
+    task.delay(0.1, function()
+        Notify("MM2 HUB", "UI minimized. Tap the floating MM2 button or press RightControl to reopen.", 4, "solar:info-circle-bold")
+    end)
+end)
 
 -- ============================================================
 --  5. TABS
